@@ -148,8 +148,8 @@ class Aquarium:
     def update_display(self, date_time):
         time_string = "Time:   %d:%02d:%02d\n" % (date_time.tm_hour, date_time.tm_min, date_time.tm_sec)
         lights_string = "Lights: {}\n".format("On" if self._lights_on else "Off")
-        water_string = "Water:  {:0.2f}C\n".format(self._water_temp)
-        air_string = "Air:    {:0.3f}C\n".format(self._air_temp)
+        water_string = "Water:  {:7.4f}C\n".format(self._water_temp)
+        air_string = "Air:    {:7.4f}C\n".format(self._air_temp)
         output = time_string + lights_string + water_string + air_string
         print(output)
 
@@ -168,7 +168,7 @@ class Aquarium:
         filename = datestamp + ".log"
         print(filename)
         timestamp = datestamp + "T{:02d}:{:02d}:{:02d}".format(date_time.tm_hour, date_time.tm_min, date_time.tm_sec)
-        log_line = "{}, {:d}, {:0.4f}, {:0.4f}".format(timestamp, self._lights_on, self._water_temp, self._air_temp)
+        log_line = "{}, {:d}, {:7.4f}, {:7.4f}".format(timestamp, self._lights_on, self._water_temp, self._air_temp)
         print(log_line)
         with open("/sd/scales_logs/" + filename, mode="at", buffering=1) as logfile:
             logfile.write(log_line + "\n")
