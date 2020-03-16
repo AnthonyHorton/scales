@@ -1,3 +1,4 @@
+from _bleio import BluetoothError
 import board
 import busio
 import digitalio
@@ -5,17 +6,23 @@ import displayio
 import rtc
 import storage
 import time
+from adafruit_ble import BLERadio
+from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
+from adafruit_ble.services.nordic import UARTService
 from adafruit_ds18x20 import DS18X20
 from adafruit_featherwing import minitft_featherwing
 from adafruit_onewire.bus import OneWireBus
 from adafruit_pcf8523 import PCF8523
 from adafruit_sdcard import SDCard
 
+__version__ = "0.4.0"
+
 # Operation settings
 LIGHTS_ON_TIME = (08, 00, 00)  # Time in (HH, mm, ss) format
 LIGHTS_OFF_TIME = (20, 00, 00)  # Time in (HH, mm, ss) format
 LOG_DATA = True
 LOG_INTERVAL = (00, 05, 00)  # Time in (HH, mm, ss) format
+BLE_NAME = "Scales Aquarium"
 
 # Hardware settings
 HEARTBEAT_PIN = board.RED_LED
@@ -52,17 +59,28 @@ class LatchingRelay:
 
 
 class TemperatureSensor:
-    def __init__(self, ow_bus, serial_number, temperature_offset):
+    def __init__(self, ow_bus, serial_number, temperature_offset, retries=3):
         ow_devices = ow_bus.scan()
         ow_sns = [ow_device.rom for ow_device in ow_devices]
         device_index = ow_sns.index(serial_number)
         self._sensor = DS18X20(ow_bus, ow_devices[device_index])
+        self._sensor.resolution = 12
         self._temp_offset = temperature_offset
+        self._retries = retries
 
     @property
     def temperature(self):
-        return self._sensor.temperature + self._temp_offset
+        for attempt in range(self._retries):
+            try:
+                t = self._sensor.temperature
+            except RuntimeError as err:
+                # Sometimes get CRC errors with BLE on?
+                print(err)
+            else:
+                # Got a successful reading. I'm out of here.
+                return t + self._temp_offset
 
+        raise RuntimeError("Too many errors attempting to read temperature sensor.")
 
 class Aquarium:
     def __init__(self,
@@ -117,6 +135,12 @@ class Aquarium:
         # Set up display
         minitft = minitft_featherwing.MiniTFTFeatherWing(i2c=i2c, spi=spi)
 
+        # Set up BLE
+        self._ble = BLERadio()
+        self._ble._adapter.name = BLE_NAME
+        self._ble_uart = UARTService()
+        self._ble_ad = ProvideServicesAdvertisement(self._ble_uart)
+
     def time_tuple_to_secs(self, time_tuple):
         return time_tuple[0] * 3600 + time_tuple[1] * 60 + time_tuple[2]
 
@@ -128,10 +152,10 @@ class Aquarium:
         time.sleep(self._heartbeat_duration)
         self._heartbeat.value = False
 
-    def update_lights(self, date_time):
+    def update_lights(self):
         # Note, for now this logic assumes the lights off time is later in the day than lights
         # on time, i.e. lights on period does not span midnight.
-        secs = self.time_tuple_to_secs((date_time.tm_hour, date_time.tm_min, date_time.tm_sec))
+        secs = self.time_tuple_to_secs((self._now.tm_hour, self._now.tm_min, self._now.tm_sec))
         if secs > self._lights_on_secs and secs < self._lights_off_secs:
            if not self._lights_on:
                self._lights_relay.enable()
@@ -145,47 +169,84 @@ class Aquarium:
         self._water_temp = self._water_sensor.temperature
         self._air_temp = self._air_sensor.temperature
 
-    def update_display(self, date_time):
-        time_string = "Time:   %d:%02d:%02d\n" % (date_time.tm_hour, date_time.tm_min, date_time.tm_sec)
+    def update_display(self):
+        time_string = "Time:   %d:%02d:%02d\n" % (self._now.tm_hour, self._now.tm_min, self._now.tm_sec)
         lights_string = "Lights: {}\n".format("On" if self._lights_on else "Off")
         water_string = "Water:  {:7.4f}C\n".format(self._water_temp)
         air_string = "Air:    {:7.4f}C\n".format(self._air_temp)
         output = time_string + lights_string + water_string + air_string
         print(output)
 
-    def update_log(self, date_time):
+    def update_log(self):
         if not self._log_data:
             return
 
         if self._last_log:
             last_log_secs = self.time_struct_to_secs(self._last_log)
-            current_secs = self.time_struct_to_secs(date_time)
+            current_secs = self.time_struct_to_secs(self._now)
             if current_secs - last_log_secs < self._log_interval:
                 return
 
         print("Updating log:")
-        datestamp = "{:04d}-{:02d}-{:02d}".format(date_time.tm_year, date_time.tm_mon, date_time.tm_mday)
+        datestamp, timestamp, log_line = self._get_status_strings()
         filename = datestamp + ".log"
         print(filename)
-        timestamp = datestamp + "T{:02d}:{:02d}:{:02d}".format(date_time.tm_hour, date_time.tm_min, date_time.tm_sec)
-        log_line = "{}, {:d}, {:7.4f}, {:7.4f}".format(timestamp, self._lights_on, self._water_temp, self._air_temp)
         print(log_line)
         with open("/sd/scales_logs/" + filename, mode="at", buffering=1) as logfile:
             logfile.write(log_line + "\n")
-        self._last_log = date_time
+        self._last_log = self._now
+        self._last_log = self._now
         print("Done.\n")
+
+    def blelele(self):
+        if not self._ble.connected:
+            # Not connected, so make sure we're advertising for connections.
+            try:
+                self._ble.start_advertising(self._ble_ad)
+            except BluetoothError:
+                # Already advertising. Probably.
+                pass
+            return
+
+        if self._ble_uart.in_waiting:
+            # There's a command waiting.
+            ble_command = self._ble_uart.readline()
+            if ble_command:
+                # First echo command, then respond.
+                self._ble_uart.write(ble_command + b'\n')
+                self._ble_respond(ble_command)
 
     def run_once(self):
         self.heartbeat()
-        now = time.localtime()
-        self.update_lights(now)
+        self._now = time.localtime()
+        self.update_lights()
         self.update_temps()
-        self.update_display(now)
-        self.update_log(now)
+        self.update_display()
+        self.update_log()
+        self.blelele()
+        time.sleep(1)
 
     def run(self):
         while True:
             self.run_once()
+
+    def _ble_respond(self, ble_command):
+        if ble_command == b"v?":
+            response = bytes("{} v{}\n".format(BLE_NAME, __version__), 'ascii')
+        elif ble_command == b"s?":
+            _, _, response = self._get_status_strings()
+            response = bytes(response, 'ascii')
+        else:
+            command = str(ble_command, 'ascii')
+            response = bytes("ERROR: Invalid command '{}'\n".format(command), 'ascii')
+
+        self._ble_uart.write(response)
+
+    def _get_status_strings(self):
+        datestamp = "{:04d}-{:02d}-{:02d}".format(self._now.tm_year, self._now.tm_mon, self._now.tm_mday)
+        timestamp = datestamp + "T{:02d}:{:02d}:{:02d}".format(self._now.tm_hour, self._now.tm_min, self._now.tm_sec)
+        status = "{}, {:d}, {:7.4f}, {:7.4f}".format(timestamp, self._lights_on, self._water_temp, self._air_temp)
+        return datestamp, timestamp, status
 
 
 aquarium = Aquarium()
