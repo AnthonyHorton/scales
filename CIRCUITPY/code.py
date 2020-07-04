@@ -224,6 +224,7 @@ class TemperatureSensor:
             except RuntimeError as err:
                 # Sometimes get CRC errors with BLE on?
                 print(err)
+                print("\n\n\n\n")
             else:
                 # Got a successful reading. I'm out of here.
                 return t + self._temp_offset
