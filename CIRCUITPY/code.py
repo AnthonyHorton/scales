@@ -17,13 +17,14 @@ from adafruit_onewire.bus import OneWireBus
 from adafruit_pcf8523 import PCF8523
 from adafruit_sdcard import SDCard
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # Operation settings
-LIGHTS_ON_TIME = (02, 01, 00)  # Time in (HH, mm, ss) format
-LIGHTS_OFF_TIME = (02, 21, 30)  # Time in (HH, mm, ss) format
-FEEDING_TIMES = ((02, 06, 00), (02, 21, 00))
+LIGHTS_ON_TIME = (07, 30, 00)  # Time in (HH, mm, ss) format
+LIGHTS_OFF_TIME = (19, 30, 30)  # Time in (HH, mm, ss) format
+FEEDING_TIMES = ((08, 30, 00), (18, 00, 00))
 PORTIONS_PER_MEAL = 2
+DISPLAY_TIMEOUT = 300  # How long the display remains on, in seconds.
 LOG_DATA = True
 LOG_INTERVAL = (00, 05, 00)  # Time in (HH, mm, ss) format
 BLE_NAME = "Scales Aquarium"
@@ -39,9 +40,9 @@ FEEDER_STEP_DELAY = 0.01
 FEEDER_STEP_STYLE = stepper.DOUBLE
 OW_PIN = board.D13
 WATER_SN = b'\x28\xaa\x87\xed\x37\x14\x01\xee'
-WATER_OFFSET = 0.0  # Temperature sensor zero point offset in degrees C
-AIR_SN = b'\x28\x11\x8d\x97\x0a\x00\x00\x58'
-AIR_OFFSET = 0.0  # Temperature sensor zero point offset in degrees C
+WATER_OFFSET = 0.0625  # Temperature sensor zero point offset in degrees C
+AIR_SN = b'\x28\xaa\x83\x95\x53\x14\x01\x7e'
+AIR_OFFSET = -0.125  # Temperature sensor zero point offset in degrees C
 SD_CS = board.D10
 
 
@@ -109,12 +110,12 @@ class Lights(LatchingRelay):
         secs = time_struct_to_secs(now)
         if secs > self._on_secs and secs < self._off_secs:
             if not self.is_enabled:
+                print("Turning lights on.\n\n\n\n")
                 self.enable()
-                print("Lights turned on.")
         if secs < self._on_secs or secs > self._off_secs:
             if self.is_enabled:
+                print("Turning light off.\n\n\n\n")
                 self.disable()
-                print("Lights turned off.")
 
 
 class StepperMotor:
@@ -183,8 +184,9 @@ class Feeder(StepperMotor):
     def feed(self, n_portions=1):
         n_portions = int(n_portions)
         assert n_portions > 0
+        print(f"Feeding {n_portions} portions.\n\n\n\n")
         self.rotate(n_portions)
-        print(f"Fed {n_portions} portions.")
+
 
     def update(self):
         now = time.localtime()
@@ -201,7 +203,7 @@ class Feeder(StepperMotor):
         if secs > next_feed:
             self.feed(self.portions_per_meal)
             self._meals_fed_today += 1
-            print(f"Fed meal {self._meals_fed_today} of {self._n_times}.")
+            print(f"Fed meal {self._meals_fed_today} of {self._n_times}.\n\n\n\n")
 
 
 class TemperatureSensor:
@@ -228,6 +230,41 @@ class TemperatureSensor:
 
         raise RuntimeError("Too many errors attempting to read temperature sensor.")
 
+
+class Display(minitft_featherwing.MiniTFTFeatherWing):
+    def __init__(self, aquarium, display_timeout, i2c, spi):
+        super().__init__(i2c=i2c, spi=spi)
+        self.aquarium = aquarium
+        self.timeout = display_timeout
+        self.turned_on = time_struct_to_secs(time.localtime())
+
+    @property
+    def is_enabled(self):
+        return self.backlight < 1.0
+
+    def enable(self):
+        self.backlight = 0.0
+        self.turned_on = time_struct_to_secs(time.localtime())
+
+    def disable(self):
+        self.backlight = 1.0
+
+    def update(self):
+        if any(self.buttons):
+            self.enable()
+        now = time.localtime()
+        secs = time_struct_to_secs(now)
+        if self.is_enabled and secs > self.turned_on + self.timeout:
+            self.disable()
+
+        time_string = "Time:   %d:%02d:%02d\n" % (now.tm_hour, now.tm_min, now.tm_sec)
+        lights_string = "Lights: {}\n".format("On" if self.aquarium.lights.is_enabled else "Off")
+        water_string = "Water:  {:7.4f}C\n".format(self.aquarium.water_temp)
+        air_string = "Air:    {:7.4f}C\n".format(self.aquarium.air_temp)
+        output = time_string + lights_string + water_string + air_string
+        print(output)
+
+
 class Aquarium:
     def __init__(self):
         # Set up heartbeat output (i.e red LED)
@@ -235,27 +272,33 @@ class Aquarium:
         self._heartbeat.direction = digitalio.Direction.OUTPUT
         self._heartbeat_duration = HEARTBEAT_DURATION
 
-        # Set up lights
+        # Set up I2C bus
+        i2c = busio.I2C(board.SCL, board.SDA)
+        # Set up SPI bus
+        spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+
+        # Set up real time clock as source for time.time() or time.localtime() calls.
+        print("Initialising real time clock.\n\n\n\n")
+        clock = PCF8523(i2c)
+        rtc.set_time_source(clock)
+
+        print("Initialising display.\n\n\n\n")
+        self.display = Display(self, DISPLAY_TIMEOUT, i2c, spi)
+
+        print("Initialising lights.\n\n\n\n")
         self.lights = Lights(LIGHTS_ON_TIME, LIGHTS_OFF_TIME, LIGHTS_ENABLE_PIN, LIGHTS_DISABLE_PIN)
 
-        # Set up 1-Wire temperature sensors
+        print("Initialising feeder.\n\n\n\n")
+        self.feeder = Feeder(FEEDING_TIMES, PORTIONS_PER_MEAL, FEEDER_MOTOR, FEEDER_STEPS_PER_ROTATION,
+                             FEEDER_STEP_DELAY, FEEDER_STEP_STYLE, i2c)
+
+        print("Initialising temperature sensors.\n\n\n\n")
         ow_bus = OneWireBus(OW_PIN)
         self.water_sensor = TemperatureSensor(ow_bus, WATER_SN, WATER_OFFSET)
         self.air_sensor = TemperatureSensor(ow_bus, AIR_SN, AIR_OFFSET)
 
-        # Set up I2C bus
-        i2c = busio.I2C(board.SCL, board.SDA)
-
-        # Set up feeder
-        self.feeder = Feeder(FEEDING_TIMES, PORTIONS_PER_MEAL, FEEDER_MOTOR, FEEDER_STEPS_PER_ROTATION,
-                             FEEDER_STEP_DELAY, FEEDER_STEP_STYLE, i2c)
-
-        # Set up real time clock as source for time.time() or time.localtime() calls.
-        clock = PCF8523(i2c)
-        rtc.set_time_source(clock)
-
         # Set up SD card
-        spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+        print("Setting up logging.\n\n\n\n")
         cs = digitalio.DigitalInOut(SD_CS)
         sdcard = SDCard(spi, cs)
         vfs = storage.VfsFat(sdcard)
@@ -264,10 +307,7 @@ class Aquarium:
         self._log_interval = time_tuple_to_secs(LOG_INTERVAL)
         self._last_log = None
 
-        # Set up display
-        minitft = minitft_featherwing.MiniTFTFeatherWing(i2c=i2c, spi=spi)
-
-        # Set up BLE
+        print("Initialising Bluetooth.\n\n\n\n")
         self._ble = BLERadio()
         self._ble._adapter.name = BLE_NAME
         self._ble_uart = UARTService()
@@ -281,14 +321,6 @@ class Aquarium:
     def update_temps(self):
         self.water_temp = self.water_sensor.temperature
         self.air_temp = self.air_sensor.temperature
-
-    def update_display(self):
-        time_string = "Time:   %d:%02d:%02d\n" % (self._now.tm_hour, self._now.tm_min, self._now.tm_sec)
-        lights_string = "Lights: {}\n".format("On" if self.lights.is_enabled else "Off")
-        water_string = "Water:  {:7.4f}C\n".format(self.water_temp)
-        air_string = "Air:    {:7.4f}C\n".format(self.air_temp)
-        output = time_string + lights_string + water_string + air_string
-        print(output)
 
     def update_log(self):
         if not self._log_data:
@@ -335,7 +367,7 @@ class Aquarium:
         self.lights.update()
         self.feeder.update()
         self.update_temps()
-        self.update_display()
+        self.display.update()
         self.update_log()
         self.blelele()
         time.sleep(1)
@@ -350,6 +382,9 @@ class Aquarium:
         elif ble_command == b"s?":
             _, _, response = self._get_status_strings()
             response = bytes(response, 'ascii')
+        elif ble_command == b"ff":
+            self.feeder.feed()
+            response = bytes("Fed 1 portion.", 'ascii')
         else:
             command = str(ble_command, 'ascii')
             response = bytes("ERROR: Invalid command '{}'\n".format(command), 'ascii')
