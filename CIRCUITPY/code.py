@@ -17,7 +17,7 @@ from adafruit_onewire.bus import OneWireBus
 from adafruit_pcf8523 import PCF8523
 from adafruit_sdcard import SDCard
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # Operation settings
 LIGHTS_ON_TIME = (07, 30, 00)  # Time in (HH, mm, ss) format
@@ -378,13 +378,20 @@ class Aquarium:
 
     def _ble_respond(self, ble_command):
         if ble_command == b"v?":
-            response = bytes("{} v{}\n".format(BLE_NAME, __version__), 'ascii')
+            response = bytes(f"{BLE_NAME} v{__version__}\n", 'ascii')
         elif ble_command == b"s?":
             _, _, response = self._get_status_strings()
+            response = bytes(response, 'ascii')
+        elif ble_command == b"f?":
+            response = f"{self.feeder.feeding_times}, {self.feeder.portions_per_meal}"
             response = bytes(response, 'ascii')
         elif ble_command == b"ff":
             self.feeder.feed()
             response = bytes("Fed 1 portion.", 'ascii')
+        elif len(ble_command) > 2 and ble_command[:2] == b"fp":
+            portions = int(str(ble_command[2:], 'ascii'))
+            self.feeder.portions_per_meal = portions
+            response = bytes(f"Set portions per meal to {portions}.", 'ascii')
         else:
             command = str(ble_command, 'ascii')
             response = bytes("ERROR: Invalid command '{}'\n".format(command), 'ascii')
