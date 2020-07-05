@@ -3,9 +3,11 @@ import board
 import busio
 import digitalio
 import displayio
+import microcontroller
 import rtc
 import storage
 import time
+import watchdog
 from adafruit_ble import BLERadio
 from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
 from adafruit_ble.services.nordic import UARTService
@@ -17,19 +19,21 @@ from adafruit_onewire.bus import OneWireBus
 from adafruit_pcf8523 import PCF8523
 from adafruit_sdcard import SDCard
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 # Operation settings
 LIGHTS_ON_TIME = (07, 30, 00)  # Time in (HH, mm, ss) format
 LIGHTS_OFF_TIME = (19, 30, 30)  # Time in (HH, mm, ss) format
 FEEDING_TIMES = ((08, 30, 00), (18, 00, 00))
-PORTIONS_PER_MEAL = 2
+PORTIONS_PER_MEAL = 1
 DISPLAY_TIMEOUT = 300  # How long the display remains on, in seconds.
 LOG_DATA = True
 LOG_INTERVAL = (00, 05, 00)  # Time in (HH, mm, ss) format
 BLE_NAME = "Scales Aquarium"
 
 # Hardware settings
+WATCHDOG_TIMEOUT = 60
+WATCHDOG_MODE = watchdog.WatchDogMode.RESET
 HEARTBEAT_PIN = board.RED_LED
 HEARTBEAT_DURATION = 0.02  # seconds
 LIGHTS_ENABLE_PIN = board.D11
@@ -207,7 +211,7 @@ class Feeder(StepperMotor):
 
 
 class TemperatureSensor:
-    def __init__(self, ow_bus, serial_number, temperature_offset, retries=3):
+    def __init__(self, ow_bus, serial_number, temperature_offset, retries=5):
         ow_devices = ow_bus.scan()
         ow_sns = [ow_device.rom for ow_device in ow_devices]
         device_index = ow_sns.index(serial_number)
@@ -268,6 +272,11 @@ class Display(minitft_featherwing.MiniTFTFeatherWing):
 
 class Aquarium:
     def __init__(self):
+        # Set up watchdog timer
+        self.watchdog = microcontroller.watchdog
+        self.watchdog.timeout = WATCHDOG_TIMEOUT
+        self.watchdog.mode = WATCHDOG_MODE
+
         # Set up heartbeat output (i.e red LED)
         self._heartbeat = digitalio.DigitalInOut(HEARTBEAT_PIN)
         self._heartbeat.direction = digitalio.Direction.OUTPUT
@@ -315,6 +324,7 @@ class Aquarium:
         self._ble_ad = ProvideServicesAdvertisement(self._ble_uart)
 
     def heartbeat(self):
+        self.watchdog.feed()
         self._heartbeat.value = True
         time.sleep(self._heartbeat_duration)
         self._heartbeat.value = False
