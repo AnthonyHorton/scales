@@ -19,13 +19,13 @@ from adafruit_onewire.bus import OneWireBus
 from adafruit_pcf8523 import PCF8523
 from adafruit_sdcard import SDCard
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # Operation settings
 LIGHTS_ON_TIME = (07, 30, 00)  # Time in (HH, mm, ss) format
 LIGHTS_OFF_TIME = (19, 30, 30)  # Time in (HH, mm, ss) format
 FEEDING_TIMES = ((08, 30, 00), (18, 00, 00))
-PORTIONS_PER_MEAL = 1
+PORTIONS_PER_MEAL = 2
 DISPLAY_TIMEOUT = 300  # How long the display remains on, in seconds.
 LOG_DATA = True
 LOG_INTERVAL = (00, 05, 00)  # Time in (HH, mm, ss) format
@@ -274,6 +274,7 @@ class Aquarium:
     def __init__(self):
         # Set up watchdog timer
         self.watchdog = microcontroller.watchdog
+        self.watchdog.deinit()
         self.watchdog.timeout = WATCHDOG_TIMEOUT
         self.watchdog.mode = WATCHDOG_MODE
 
